@@ -3,6 +3,7 @@
 # ============================================================
 #   Termux Auto Setup Script
 #   Installs essential packages, Python libs, aliases & more
+#   github.com/taisizlar/termux-setup
 # ============================================================
 
 # ── Colors ──────────────────────────────────────────────────
@@ -18,11 +19,22 @@ RESET='\033[0m'
 # ── State tracking ──────────────────────────────────────────
 FAILED=()
 SUCCESS=()
+SKIPPED=()
 TOTAL=0
 CURRENT=0
 
-# ── Helpers ─────────────────────────────────────────────────
+# ── tput fallback — some Termux builds glitch with cuu1 ─────
+clear_prev_lines() {
+    local n="${1:-1}"
+    if tput cuu1 &>/dev/null; then
+        for ((i=0; i<n; i++)); do tput cuu1; tput el; done
+    else
+        # fallback: just print a blank line separator
+        echo ""
+    fi
+}
 
+# ── Helpers ─────────────────────────────────────────────────
 print_banner() {
     clear
     echo -e "${CYAN}${BOLD}  🚀 Termux Auto Setup${RESET}  ${BLUE}by taisizlar${RESET}"
@@ -31,6 +43,7 @@ print_banner() {
 
 log_info()    { echo -e "  ${CYAN}[INFO]${RESET}  $1"; }
 log_ok()      { echo -e "  ${GREEN}[✔]${RESET}    $1"; }
+log_skip()    { echo -e "  ${BLUE}[~]${RESET}    $1 (already installed)"; }
 log_warn()    { echo -e "  ${YELLOW}[⚠]${RESET}    $1"; }
 log_error()   { echo -e "  ${RED}[✘]${RESET}    $1"; }
 log_section() { echo -e "\n${BOLD}${BLUE}▸ $1${RESET}\n"; }
@@ -44,42 +57,6 @@ progress_bar() {
     for ((i=0; i<filled; i++)); do bar+="█"; done
     for ((i=0; i<empty; i++));  do bar+="░"; done
     printf "  ${CYAN}[${bar}]${RESET} ${BOLD}%3d%%${RESET}  (%d/%d)\n" "$percent" "$CURRENT" "$TOTAL"
-}
-
-# Installs a single pkg package and reports success/failure
-install_pkg() {
-    local pkg="$1"
-    CURRENT=$(( CURRENT + 1 ))
-
-    printf "  ${YELLOW}◉ Installing:${RESET} %-25s" "$pkg"
-    progress_bar
-
-    if pkg install -y "$pkg" &>/dev/null; then
-        tput cuu1; tput el   # clear progress line
-        tput cuu1; tput el   # clear install line
-        log_ok "$pkg"
-        SUCCESS+=("$pkg")
-    else
-        tput cuu1; tput el
-        tput cuu1; tput el
-        log_error "$pkg — installation failed"
-        FAILED+=("$pkg")
-    fi
-}
-
-# Installs a single pip package and reports success/failure
-install_pip() {
-    local pkg="$1"
-    printf "  ${YELLOW}◉ pip install:${RESET} %-20s\n" "$pkg"
-    if pip install --upgrade "$pkg" -q --no-warn-script-location 2>/dev/null; then
-        tput cuu1; tput el
-        log_ok "$pkg"
-        SUCCESS+=("pip:$pkg")
-    else
-        tput cuu1; tput el
-        log_error "$pkg — pip install failed"
-        FAILED+=("pip:$pkg")
-    fi
 }
 
 # ── Internet check ───────────────────────────────────────────
@@ -101,6 +78,92 @@ update_system() {
         log_ok "System updated successfully."
     else
         log_warn "Update encountered issues — continuing anyway..."
+    fi
+}
+
+# ── pkg install — skips if already installed ─────────────────
+install_pkg() {
+    local pkg="$1"
+    CURRENT=$(( CURRENT + 1 ))
+
+    # Skip if already installed
+    if pkg list-installed 2>/dev/null | grep -q "^${pkg}/"; then
+        log_skip "$pkg"
+        SKIPPED+=("$pkg")
+        return
+    fi
+
+    printf "  ${YELLOW}◉ Installing:${RESET} %-25s" "$pkg"
+    progress_bar
+
+    if pkg install -y "$pkg" &>/dev/null; then
+        clear_prev_lines 2
+        log_ok "$pkg"
+        SUCCESS+=("$pkg")
+    else
+        clear_prev_lines 2
+        log_error "$pkg — installation failed"
+        FAILED+=("$pkg")
+    fi
+}
+
+# ── pip install — checks pip exists, skips if installed ──────
+install_pip() {
+    local pkg="$1"
+
+    # Check pip is available
+    if ! command -v pip &>/dev/null; then
+        log_error "pip not found — skipping Python packages."
+        FAILED+=("pip:$pkg")
+        return
+    fi
+
+    # Skip if already installed (pip show exit 0 = installed)
+    if pip show "$pkg" &>/dev/null; then
+        log_skip "pip:$pkg"
+        SKIPPED+=("pip:$pkg")
+        return
+    fi
+
+    printf "  ${YELLOW}◉ pip install:${RESET} %-20s\n" "$pkg"
+    if pip install --upgrade "$pkg" -q --no-warn-script-location 2>/dev/null; then
+        clear_prev_lines 1
+        log_ok "$pkg"
+        SUCCESS+=("pip:$pkg")
+    else
+        clear_prev_lines 1
+        log_error "$pkg — pip install failed"
+        FAILED+=("pip:$pkg")
+    fi
+}
+
+# ── gem install — checks gem exists, skips if installed ──────
+install_gem() {
+    local pkg="$1"
+
+    # Check gem is available
+    if ! command -v gem &>/dev/null; then
+        log_error "gem not found — skipping Ruby gems."
+        FAILED+=("gem:$pkg")
+        return
+    fi
+
+    # Skip if already installed
+    if gem list "$pkg" 2>/dev/null | grep -q "^${pkg}"; then
+        log_skip "gem:$pkg"
+        SKIPPED+=("gem:$pkg")
+        return
+    fi
+
+    log_info "Installing $pkg..."
+    if gem install "$pkg" &>/dev/null; then
+        clear_prev_lines 1
+        log_ok "$pkg"
+        SUCCESS+=("gem:$pkg")
+    else
+        clear_prev_lines 1
+        log_error "$pkg — gem install failed"
+        FAILED+=("gem:$pkg")
     fi
 }
 
@@ -138,9 +201,11 @@ print_summary() {
     echo -e "\n${BLUE}  ──────────────────────────────────────────────────${RESET}"
     echo -e "${BOLD}  📋 Installation Summary${RESET}\n"
 
-    echo -e "  ${GREEN}✔ Succeeded: ${#SUCCESS[@]} packages${RESET}"
+    echo -e "  ${GREEN}✔ Installed : ${#SUCCESS[@]} packages${RESET}"
+    echo -e "  ${BLUE}~ Skipped   : ${#SKIPPED[@]} packages (already present)${RESET}"
+
     if [ ${#FAILED[@]} -gt 0 ]; then
-        echo -e "  ${RED}✘ Failed   : ${#FAILED[@]} packages${RESET}"
+        echo -e "  ${RED}✘ Failed    : ${#FAILED[@]} packages${RESET}"
         echo -e "\n  ${RED}Failed packages:${RESET}"
         for pkg in "${FAILED[@]}"; do
             echo -e "    ${RED}• $pkg${RESET}"
@@ -184,16 +249,9 @@ for pkg in "${PKG_TOOLS[@]}"; do install_pkg "$pkg"; done
 log_section "Fun Tools"
 for pkg in "${PKG_FUN[@]}"; do install_pkg "$pkg"; done
 
-# ── Install Ruby gem ─────────────────────────────────────────
+# ── Install Ruby gems ────────────────────────────────────────
 log_section "Ruby Gems"
-log_info "Installing lolcat..."
-if gem install lolcat &>/dev/null; then
-    log_ok "lolcat"
-    SUCCESS+=("lolcat (gem)")
-else
-    log_error "lolcat — gem install failed"
-    FAILED+=("lolcat (gem)")
-fi
+install_gem lolcat
 
 # ── Install Python packages via pip ─────────────────────────
 log_section "Python Packages (pip)"
